@@ -681,30 +681,29 @@ function joinRoom(){
 // ── BANKER PEER INIT ──
 function initPeerBanker(code, name){
   setNetStatus('warn');
-  updateWaitStatus('Iniciando servidor P2P...');
+  updateWaitStatus('Iniciando sala...');
   const peerId = makePeerId(code, true);
   ME.peerId = peerId;
 
-  peer = new Peer(peerId, {
-    host: '0.peerjs.com', port: 443, secure: true,
-    path: '/', key: 'peerjs',
-    debug: 0,
-    config:{iceServers:[
-      {urls:'stun:stun.l.google.com:19302'},
-      {urls:'stun:stun1.l.google.com:19302'},
-      {urls:'stun:global.stun.twilio.com:3478'}
-    ]}
-  });
+  // Timeout si no conecta en 12s
+  const timeout = setTimeout(()=>{
+    if(!peer||peer.disconnected){
+      updateWaitStatus('⚠️ Tardando más de lo normal, reintentando...');
+      try{peer&&peer.destroy();}catch(e){}
+      initPeerBanker(code, name);
+    }
+  }, 12000);
+
+  peer = new Peer(peerId);  // ★ Sin config = usa servidor PeerJS oficial por defecto
 
   peer.on('open', id => {
+    clearTimeout(timeout);
     setNetStatus('on');
-    updateWaitStatus('Sala abierta — esperando jugadores...');
+    updateWaitStatus('✅ Sala abierta — comparte el código');
     ME.peerId = id;
-    // Init game state
     GS = newGameState();
     GS.bankerName = name;
     GS.phase = 'waiting';
-    // Add banker as first "player" entry just for tracking (not for playing)
     addPlayerToGS(id, name, ME.balance, true);
     renderWaitingRoom();
   });
@@ -718,14 +717,19 @@ function initPeerBanker(code, name){
     });
   });
 
-  peer.on('disconnected', () => { setNetStatus('warn'); peer.reconnect(); });
+  peer.on('disconnected', () => { setNetStatus('warn'); try{peer.reconnect();}catch(e){} });
   peer.on('error', e => {
+    clearTimeout(timeout);
     setNetStatus('off');
     if(e.type==='unavailable-id'){
-      toast('❌ Sala '+code+' ya existe. Genera otra.');
-      showScreen('s-lobby');
-    } else {
+      // ID ocupado — genera uno nuevo automáticamente
+      toast('⚠️ Código ocupado, generando otro...');
+      setTimeout(()=>createRoom(), 800);
+    } else if(e.type==='network'||e.type==='server-error'||e.type==='socket-error'){
+      updateWaitStatus('❌ Error de red. Comprueba tu conexión.');
       toast('❌ Error de red: '+e.type);
+    } else {
+      toast('❌ '+e.type);
     }
   });
 }
@@ -733,45 +737,49 @@ function initPeerBanker(code, name){
 // ── PLAYER PEER INIT ──
 function initPeerPlayer(code, name){
   setNetStatus('warn');
-  const peerId = makePeerId(code, false);
-  ME.peerId = peerId;
+  updateWaitStatus('Conectando...');
 
-  peer = new Peer(peerId, {
-    host:'0.peerjs.com', port:443, secure:true,
-    path:'/', key:'peerjs', debug:0,
-    config:{iceServers:[
-      {urls:'stun:stun.l.google.com:19302'},
-      {urls:'stun:stun1.l.google.com:19302'},
-      {urls:'stun:global.stun.twilio.com:3478'}
-    ]}
-  });
+  // Timeout si no conecta en 15s
+  let connected = false;
+  const timeout = setTimeout(()=>{
+    if(!connected){
+      updateWaitStatus('⚠️ Sin respuesta. ¿Está la Banca activa?');
+      toast('⚠️ No se pudo conectar. Verifica el código.');
+      setNetStatus('off');
+    }
+  }, 15000);
+
+  peer = new Peer(); // ★ ID aleatorio, servidor PeerJS oficial
 
   peer.on('open', id => {
     ME.peerId = id;
-    updateWaitStatus('Conectando a la Banca...');
-    // Connect to banker
-    const bankerPeerId = makePeerId(code, true); // 'BJC_'+code
+    updateWaitStatus('Buscando sala ' + code + '...');
+    const bankerPeerId = window._bankerPeerId || makePeerId(code, true);
     bankerConn = peer.connect(bankerPeerId, {reliable:true});
+
     bankerConn.on('open', () => {
+      connected = true;
+      clearTimeout(timeout);
       setNetStatus('on');
-      updateWaitStatus('Conectado ✓ Esperando inicio...');
+      updateWaitStatus('✅ Conectado — esperando inicio...');
       bankerConn.send({type:'PLAYER_JOIN', name, balance:ME.balance});
-      // Keepalive
       setInterval(()=>{ try{bankerConn.send({type:'PING'});}catch(e){} }, 5000);
     });
     bankerConn.on('data', data => handlePlayerMsg(data));
     bankerConn.on('close', () => { setNetStatus('off'); toast('⚠️ Banca desconectada'); });
-    bankerConn.on('error', e => { setNetStatus('off'); toast('❌ '+e.message); });
+    bankerConn.on('error', e => {
+      clearTimeout(timeout);
+      setNetStatus('off');
+      toast('❌ No se pudo conectar a la sala "'+code+'"');
+      updateWaitStatus('❌ Sala no encontrada. ¿Es correcto el código?');
+    });
   });
 
   peer.on('error', e => {
+    clearTimeout(timeout);
     setNetStatus('off');
-    if(e.type==='peer-unavailable'){
-      toast('❌ Sala "'+code+'" no encontrada');
-      showScreen('s-lobby');
-    } else {
-      toast('❌ '+e.type);
-    }
+    updateWaitStatus('❌ Error de red');
+    toast('❌ '+e.type);
   });
 }
 
@@ -893,11 +901,12 @@ function renderWaitingRoom(){
 }
 
 function copyLink(){
-  const url = window.location.href.split('?')[0]+'?join='+ME.roomCode;
+  // Share both room code and the actual peerId for reliable connection
+  const baseUrl = window.location.href.split('?')[0];
+  const url = baseUrl + '?join=' + ME.roomCode + '&pid=' + encodeURIComponent(ME.peerId);
   if(navigator.clipboard){
-    navigator.clipboard.writeText(url).then(()=>toast('📋 Enlace copiado: '+ME.roomCode));
+    navigator.clipboard.writeText(url).then(()=>toast('📋 Enlace copiado'));
   } else {
-    // Fallback
     const ta=document.createElement('textarea'); ta.value=url;
     document.body.appendChild(ta); ta.select(); document.execCommand('copy');
     document.body.removeChild(ta); toast('📋 Enlace copiado');
@@ -915,11 +924,12 @@ function leaveRoom(){
 function checkDeepLink(){
   const params=new URLSearchParams(window.location.search);
   const code=params.get('join');
-  if(code&&code.length===4){
-    document.getElementById('inp-join-code').value=code.toUpperCase();
-    // Show lobby with code pre-filled
+  const pid=params.get('pid');
+  if(code&&code.length>=4){
+    document.getElementById('inp-join-code').value=code.substring(0,4).toUpperCase();
+    if(pid) window._bankerPeerId=decodeURIComponent(pid); // store for connection
     showScreen('s-lobby');
-    toast('🔗 Código '+code+' listo — escribe tu nombre y Únete');
+    toast('🔗 Código listo — escribe tu nombre y entra');
   }
 }
 
