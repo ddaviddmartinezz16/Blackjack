@@ -941,6 +941,12 @@ function startRound(){
   setupGameUI();
   broadcastState();
   bcastToast('🂠 ¡Nueva mano! Coloca tus apuestas');
+  // ★ Make sure banker sees their panel
+  document.getElementById('g-banker-panel').style.display='flex';
+  document.getElementById('g-bet-panel').style.display='none';
+  document.getElementById('g-btn-deal-banker').disabled=true;
+  document.getElementById('g-btn-deal-banker').textContent='⏳ Esperando apuestas...';
+  updateBankerStats();
 }
 
 function deal(){
@@ -976,21 +982,31 @@ function handlePlayerAction(peerId, action, payload){
   if(pIdx<0) return;
   const p = activePlayers()[pIdx];
   const isMyTurn = GS.phase==='playing' && GS.activePlayerIdx===pIdx && p.status==='playing';
+  const inBetting = GS.phase==='betting' || GS.phase==='waiting'; // ★ accept both phases
 
   switch(action){
     case 'BET':
-      if(GS.phase!=='betting'||p.ready) return;
+      if(!inBetting||p.ready) return;
       if(p.balance < payload.amount) return;
       p.bets[0]=(p.bets[0]||0)+payload.amount;
       p.balance-=payload.amount;
+      // Auto-switch to betting phase when first bet is placed
+      if(GS.phase==='waiting') GS.phase='betting';
       break;
     case 'CLEAR_BET':
-      if(GS.phase!=='betting'||p.ready) return;
+      if(!inBetting||p.ready) return;
       p.balance+=p.bets[0]||0; p.bets=[0];
       break;
     case 'READY':
-      if(GS.phase!=='betting') return;
+      if(!inBetting) return;
+      if((p.bets[0]||0)===0) return; // must have a bet
       p.ready=true; p.status='ready';
+      if(GS.phase==='waiting') GS.phase='betting';
+      // ★ Auto-deal if ALL active players are ready
+      const allReady = activePlayers().every(p2=>p2.ready);
+      if(allReady && activePlayers().length>0){
+        setTimeout(()=>{ deal(); },800);
+      }
       break;
     case 'HIT':
       if(!isMyTurn) return;
@@ -1026,7 +1042,7 @@ function handlePlayerAction(peerId, action, payload){
       break;
   }
   broadcastState();
-  updateBankerStats();
+  updateBankerStats(); // ★ update deal button immediately
 }
 
 function advanceTurn(){
@@ -1150,11 +1166,19 @@ function clearBet(){
 }
 function playerReady(){
   const me=myPlayer(); if(!me) return;
-  if((me.bets[0]||0)===0){toast('⚠️ Coloca una apuesta primero');return;}
+  if((me?.bets[0]||0)===0){
+    // Check optimistic local bet amount
+    const betAmt=document.getElementById('g-bet-amt');
+    const localBet=parseInt((betAmt?.textContent||'$0').replace('$',''))||0;
+    if(localBet===0){toast('⚠️ Coloca una apuesta primero');return;}
+  }
   sendAction('READY',{});
   toast('✅ ¡Listo! Esperando a los demás...');
-  document.getElementById('g-btn-deal').disabled=true;
-  document.getElementById('g-btn-deal').textContent='✓ Listo';
+  const dealBtn=document.getElementById('g-btn-deal');
+  if(dealBtn){dealBtn.disabled=true;dealBtn.textContent='⏳ Esperando...';}
+  // Hide chips after ready
+  const chips=document.querySelector('.chips');
+  if(chips) chips.style.opacity='0.3';
 }
 function hit(){   sendAction('HIT',{}); haptic(); }
 function stand(){ sendAction('STAND',{}); haptic(); }
@@ -1420,6 +1444,10 @@ function updatePanelVisibility(){
   document.getElementById('g-banker-panel').style.display='none';
   document.getElementById('g-action-panel').style.display=myTurn?'block':'none';
 
+  // Restore chips opacity when can bet
+  const chips=document.querySelector('.chips');
+  if(chips) chips.style.opacity=canBet?'1':'0.3';
+
   // Update ready button text
   const dealBtn=document.getElementById('g-btn-deal');
   if(dealBtn){
@@ -1447,8 +1475,20 @@ function updateBankerStats(){
   document.getElementById('g-bstat-players').textContent=players.length||'0';
   document.getElementById('g-bstat-ready').textContent=ready;
   document.getElementById('g-bstat-pot').textContent='$'+pot;
-  // Enable deal button only if someone is ready
-  document.getElementById('g-btn-deal-banker').disabled=ready===0;
+  // ★ Update deal button based on how many are ready
+  const dealBtn=document.getElementById('g-btn-deal-banker');
+  if(dealBtn){
+    if(GS.phase==='playing'||GS.phase==='dealer'){
+      dealBtn.disabled=true;
+      dealBtn.textContent='🂠 Repartiendo...';
+    } else if(ready===0){
+      dealBtn.disabled=true;
+      dealBtn.textContent='⏳ Esperando apuestas...';
+    } else {
+      dealBtn.disabled=false;
+      dealBtn.textContent=`🂠 Repartir (${ready} listo${ready>1?'s':''})`;
+    }
+  }
 }
 
 function updateBalanceDisplay(){
